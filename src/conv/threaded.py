@@ -2,8 +2,8 @@
 
 import numpy as np
 import time
-import threading
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL.Image import Image
 from conv.abstract import Conv2D
 
@@ -37,28 +37,40 @@ class Threaded(Conv2D):
         )
         output = np.zeros_like(np_image)
 
-        def process_lines(start_row, end_row):
-            nonlocal output
+        def process_block(start_row: int, end_row: int) -> tuple:
+            """Process image block.
+            
+            Args:
+                start_row (int): The first row of the block.
+                end_row (int): Last row of the block.
 
-            for i in range(img_h):
+            Returns:
+                tuple: returns a tuple with the start row and the block sums results.
+            """
+            block_result = np.zeros((end_row - start_row, img_w))
+            for i_local, i_global in enumerate(range(start_row, end_row)):
                 for j in range(img_w):
-                    pixel = padded_img[i:i+kerner_h, j:j+kerner_w]
-                    output[i, j] = np.sum(pixel * self.kernel)
+                    pixel = padded_img[i_global:i_global+kerner_h, j:j+kerner_w]
+                    block_result[i_local, j] = np.sum(pixel * self.kernel)
+            return start_row, block_result
 
-        rows_per_thread = img_h // num_threads
+        rows_per_thread = max(1, img_h // num_threads)
         threads = []
-
-        start_time = time.time()
 
         for t in range(num_threads):
             start = t * rows_per_thread
-            end = (t + 1) * rows_per_thread if t != num_threads - 1 else img_h
-            thread = threading.Thread(target=process_lines, args=(start, end))
-            threads.append(thread)
-            thread.start()
-        
-        for thread in threads:
-            thread.join()
+            end = min((t + 1) * rows_per_thread, img_h) if t != num_threads - 1 else img_h
+            if start < end:
+                threads.append((start, end))
+
+        start_time = time.time()
+
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(process_block, start, end) for start, end in threads]
+
+            for future in as_completed(futures):
+                start_row, result = future.result()
+                output[start_row:start_row + result.shape[0], :] = result
 
         end_time = time.time()
 

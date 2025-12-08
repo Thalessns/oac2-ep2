@@ -18,4 +18,4 @@ if __name__ == "__main__":
     convolved_image = standard_conv.run(image)
 
     threaded_conv = Threaded(kernel)
-    convolved_image_threaded = threaded_conv.run(image, num_threads=1)
+    convolved_image_threaded = threaded_conv.run(image, num_threads=16)
