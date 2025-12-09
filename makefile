@@ -1,44 +1,24 @@
 # Makefile para compilar todas as versões
 
 CC = g++
+NVCC = nvcc
 CFLAGS = -std=c++11 -O2
+NVCC_FLAGS = $(CFLAGS) -Xcompiler -fno-strict-aliasing
 OMP_FLAGS = -fopenmp
 CUDA_FLAGS = -DCUDA_ENABLED -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -lcudart
+OPENCV_FLAGS = `pkg-config --cflags --libs opencv4`
 
 # Alvo principal
-all: sequencial threads openmp cuda
+all: cpu cuda
 
-# Versão sequencial
-sequencial: convolucao2d.cpp
-	$(CC) $(CFLAGS) -o convolucao_seq convolucao2d.cpp
-
-# Versão com threads
-threads: convolucao2d.cpp
-	$(CC) $(CFLAGS) -pthread -o convolucao_threads convolucao2d.cpp
-
-# Versão OpenMP
-openmp: convolucao2d.cpp
-	$(CC) $(CFLAGS) $(OMP_FLAGS) -o convolucao_omp convolucao2d.cpp
+# Versão cpu
+cpu: convolucao2d.cpp
+	$(CC) $(CFLAGS) -o convolucao_cpu convolucao2d.cpp $(OPENCV_FLAGS)
 
 # Versão CUDA (requer CUDA Toolkit)
 cuda: convolucao2d.cu
-	nvcc -std=c++11 -O2 -o convolucao_cuda convolucao2d.cu
+	$(NVCC) $(NVCC_FLAGS) convolucao2d.cu -o convolucao_cuda
 
 # Limpar arquivos compilados
 clean:
-	rm -f convolucao_seq convolucao_threads convolucao_omp convolucao_cuda *.pgm
-
-# Executar testes
-test: all
-	@echo "Testando versão sequencial..."
-	./convolucao_seq
-	@echo "\nTestando versão com threads (4 threads)..."
-	./convolucao_threads
-	@echo "\nTestando versão OpenMP..."
-	./convolucao_omp
-	@if [ -f ./convolucao_cuda ]; then \
-		echo "\nTestando versão CUDA..."; \
-		./convolucao_cuda; \
-	fi
-
-.PHONY: all clean test
+	rm -f convolucao_cpu convolucao_cuda *.pgm

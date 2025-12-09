@@ -10,25 +10,101 @@
 #include <cstring>
 #include <cmath>
 #include <omp.h>
+#include <iostream>
+#include <opencv2/opencv.hpp>
 
 // ==================== CONSTANTES E ESTRUTURAS ====================
+
 const int KERNEL_SIZE = 3;
-const float KERNEL[9] = {1.0f/9, 1.0f/9, 1.0f/9,
-                         1.0f/9, 1.0f/9, 1.0f/9,
-                         1.0f/9, 1.0f/9, 1.0f/9};
+const float KERNEL[9] = {
+    1.0f/9, 1.0f/9, 1.0f/9,
+    1.0f/9, 1.0f/9, 1.0f/9,
+    1.0f/9, 1.0f/9, 1.0f/9
+};
 
 struct Image {
     int width;
     int height;
     std::vector<float> data;
     
-    Image(int w, int h) : width(w), height(h), data(w * h, 0.0f) {}
+    Image(int w = 0, int h = 0) : width(w), height(h), data(w * h, 0.0f) {}
     
     float& operator()(int y, int x) { return data[y * width + x]; }
     const float& operator()(int y, int x) const { return data[y * width + x]; }
+    
+    // Método para converter cv::Mat para Image (escala de cinza)
+    static Image fromMat(const cv::Mat& mat) {
+        if (mat.empty()) {
+            return Image(0, 0);
+        }
+        
+        Image img(mat.cols, mat.rows);
+        
+        if (mat.channels() == 1) {
+            // Já está em escala de cinza
+            for (int y = 0; y < mat.rows; y++) {
+                for (int x = 0; x < mat.cols; x++) {
+                    img(y, x) = mat.at<uchar>(y, x) / 255.0f;
+                }
+            }
+        } else if (mat.channels() == 3) {
+            // Converter BGR para escala de cinza
+            for (int y = 0; y < mat.rows; y++) {
+                for (int x = 0; x < mat.cols; x++) {
+                    cv::Vec3b pixel = mat.at<cv::Vec3b>(y, x);
+                    float gray = (pixel[0] * 0.114f +  // B
+                                  pixel[1] * 0.587f +  // G
+                                  pixel[2] * 0.299f);  // R
+                    img(y, x) = gray / 255.0f;
+                }
+            }
+        } else if (mat.channels() == 4) {
+            // RGBA para escala de cinza (ignorar canal alpha)
+            for (int y = 0; y < mat.rows; y++) {
+                for (int x = 0; x < mat.cols; x++) {
+                    cv::Vec4b pixel = mat.at<cv::Vec4b>(y, x);
+                    float gray = (pixel[0] * 0.114f +  // B
+                                  pixel[1] * 0.587f +  // G
+                                  pixel[2] * 0.299f);  // R
+                    img(y, x) = gray / 255.0f;
+                }
+            }
+        }
+        
+        return img;
+    }
+    
+    // Método para converter Image para cv::Mat
+    cv::Mat toMat() const {
+        cv::Mat mat(height, width, CV_8UC1);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                float val = data[y * width + x];
+                val = std::max(0.0f, std::min(1.0f, val));  // Clamp
+                mat.at<uchar>(y, x) = static_cast<uchar>(val * 255);
+            }
+        }
+        return mat;
+    }
 };
 
-// ==================== FUNÇÕES AUXILIARES ====================
+Image carregarImagem(const std::string& caminho, int redimensionar_largura = 0) {
+    cv::Mat img = cv::imread(caminho, cv::IMREAD_COLOR);
+    
+    if (img.empty()) {
+        throw std::runtime_error("Não foi possível carregar imagem: " + caminho);
+    }
+    
+    // Redimensionar se especificado
+    if (redimensionar_largura > 0 && redimensionar_largura != img.cols) {
+        double escala = static_cast<double>(redimensionar_largura) / img.cols;
+        int nova_altura = static_cast<int>(img.rows * escala);
+        cv::resize(img, img, cv::Size(redimensionar_largura, nova_altura));
+    }
+    
+    return Image::fromMat(img);
+}
+
 Image gerarImagemTeste(int width, int height) {
     Image img(width, height);
     for (int i = 0; i < height; i++) {
@@ -51,6 +127,7 @@ void salvarImagem(const Image& img, const std::string& filename) {
         file.put(pixel);
     }
 }
+
 
 // ==================== VERSÃO 1: SEQUENCIAL ====================
 Image convolucaoSequencial(const Image& input) {
@@ -243,7 +320,10 @@ double medirTempo(Func func, Args&&... args) {
 }
 
 // ==================== MAIN ====================
-int main() {
+int main(int argc, char* argv[]) {
+    std::string caminho_imagem;
+    caminho_imagem = argv[1];
+
     // Resoluções a testar
     std::vector<std::pair<int, int>> resolucoes = {
         {512, 512},
@@ -261,12 +341,12 @@ int main() {
         int height = res.second;
         
         std::cout << "Resolução: " << width << "x" << height << "\n";
-        std::cout << "Gerando imagem de teste...\n";
+        std::cout << "Carregando imagem de teste...\n";
         
-        Image img = gerarImagemTeste(width, height);
+        Image img = carregarImagem(caminho_imagem, width);
         
         // Versão sequencial
-        std::cout << "Executando versão sequencial...\n";
+        std::cout << "\nExecutando versão sequencial...\n";
         double tempoSeq = medirTempo([&]() {
             Image out = convolucaoSequencial(img);
             //salvarImagem(out, "saida_seq_" + std::to_string(width) + "x" + std::to_string(height) + ".pgm");
@@ -277,7 +357,7 @@ int main() {
         for (int nt : numThreads) {
             if (nt > std::thread::hardware_concurrency()) continue;
             
-            std::cout << "Executando versão com " << nt << " threads...\n";
+            std::cout << "\nExecutando versão com " << nt << " threads...\n";
             double tempoThreads = medirTempo([&]() {
                 Image out = convolucaoThreads(img, nt);
             });
@@ -290,7 +370,7 @@ int main() {
         }
         
         // Versão OpenMP
-        std::cout << "Executando versão OpenMP...\n";
+        std::cout << "\nExecutando versão OpenMP...\n";
         double tempoOpenMP = medirTempo([&]() {
             Image out = convolucaoOpenMP(img);
         });
