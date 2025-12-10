@@ -18,7 +18,7 @@ Para rodar a aplicação, compile os arquivos da seguinte forma, estando na raiz
 make all
 ```
 
-Para executar, escolha o arquivo desejado `convolucao_cpu` ou `convolucao_cuda` e também o caminho para uma imagem que será processada.
+Para executar, escolha o arquivo desejado `convolucao_cpu` ou `convolucao_cuda` e também o `caminho para uma imagem` que será processada.
 ```shell
 ./convolucao_cpu imagens/dog.jpg
 ```
