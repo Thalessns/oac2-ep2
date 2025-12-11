@@ -210,12 +210,74 @@ Image convolucaoThreads(const Image& input, int numThreads) {
 }
 
 // ==================== VERSÃO 3: OPENMP ====================
-Image convolucaoOpenMP(const Image& input, int scheduleType = 0) {
+Image convolucaoOpenMPStatic(const Image& input, int scheduleType = 0) {
     Image output(input.width, input.height);
     int kernelRadius = KERNEL_SIZE / 2;
     int maxThreads = omp_get_max_threads();
 
-    #pragma omp parallel for num_threads(maxThreads)
+    #pragma omp parallel for num_threads(maxThreads) schedule(static)
+    for (int y = 0; y < input.height; y++) {
+        for (int x = 0; x < input.width; x++) {
+            float sum = 0.0f;
+            
+            for (int ky = -kernelRadius; ky <= kernelRadius; ky++) {
+                for (int kx = -kernelRadius; kx <= kernelRadius; kx++) {
+                    int iy = y + ky;
+                    int ix = x + kx;
+                    
+                    if (iy < 0) iy = 0;
+                    if (iy >= input.height) iy = input.height - 1;
+                    if (ix < 0) ix = 0;
+                    if (ix >= input.width) ix = input.width - 1;
+                    
+                    int kernelIdx = (ky + kernelRadius) * KERNEL_SIZE + (kx + kernelRadius);
+                    sum += input(iy, ix) * KERNEL[kernelIdx];
+                }
+            }
+            output(y, x) = sum;
+        }
+    }
+    
+    return output;
+}
+
+Image convolucaoOpenMPDynamic(const Image& input, int scheduleType = 0) {
+    Image output(input.width, input.height);
+    int kernelRadius = KERNEL_SIZE / 2;
+    int maxThreads = omp_get_max_threads();
+
+    #pragma omp parallel for num_threads(maxThreads) schedule(dynamic)
+    for (int y = 0; y < input.height; y++) {
+        for (int x = 0; x < input.width; x++) {
+            float sum = 0.0f;
+            
+            for (int ky = -kernelRadius; ky <= kernelRadius; ky++) {
+                for (int kx = -kernelRadius; kx <= kernelRadius; kx++) {
+                    int iy = y + ky;
+                    int ix = x + kx;
+                    
+                    if (iy < 0) iy = 0;
+                    if (iy >= input.height) iy = input.height - 1;
+                    if (ix < 0) ix = 0;
+                    if (ix >= input.width) ix = input.width - 1;
+                    
+                    int kernelIdx = (ky + kernelRadius) * KERNEL_SIZE + (kx + kernelRadius);
+                    sum += input(iy, ix) * KERNEL[kernelIdx];
+                }
+            }
+            output(y, x) = sum;
+        }
+    }
+    
+    return output;
+}
+
+Image convolucaoOpenMPCollapse(const Image& input, int scheduleType = 0) {
+    Image output(input.width, input.height);
+    int kernelRadius = KERNEL_SIZE / 2;
+    int maxThreads = omp_get_max_threads();
+
+    #pragma omp parallel for num_threads(maxThreads) collapse(2)
     for (int y = 0; y < input.height; y++) {
         for (int x = 0; x < input.width; x++) {
             float sum = 0.0f;
@@ -311,17 +373,37 @@ Image convolucaoCUDA(const Image& input) {
 
 // ==================== MEDIÇÃO DE TEMPO ====================
 template<typename Func, typename... Args>
-double medirTempo(Func func, Args&&... args) {
-    auto inicio = std::chrono::high_resolution_clock::now();
-    func(std::forward<Args>(args)...);
-    auto fim = std::chrono::high_resolution_clock::now();
-    
-    std::chrono::duration<double> duracao = fim - inicio;
-    return duracao.count();
+double * medirTempo(Func func, Args&&... args) {
+    int maxExecs = 10;
+    double times[maxExecs];
+    double totalTime = 0;
+    // Executando função e obtendo tempos
+    for (int execTimes = 0; execTimes < maxExecs; execTimes++){
+        auto inicio = std::chrono::high_resolution_clock::now();
+        func(std::forward<Args>(args)...);
+        auto fim = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> duracao = fim - inicio;
+        times[execTimes] = duracao.count();
+        totalTime += duracao.count();
+    }
+    // Obtendo média
+    double media = totalTime / maxExecs;
+    // Calculando desvio padrao
+    double aux = 0, desvio = 0;
+    for (int i = 0; i < maxExecs; i++){
+        aux += pow(times[i] - media, 2);
+    }
+    desvio = aux / maxExecs;
+    // Preparando resultados
+    double *result = new double[2];
+    result[0] = media;
+    result[1] = desvio;
+    return result;
 }
 
 // ==================== MAIN ====================
 int main(int argc, char* argv[]) {
+    std::cout << std::fixed << std::setprecision(12);
     std::string caminho_imagem;
     caminho_imagem = argv[1];
 
@@ -336,7 +418,13 @@ int main(int argc, char* argv[]) {
     std::vector<int> numThreads = {1, 2, 4, 8, 16};
     
     std::cout << "=== EXPERIMENTO DE CONVOLUÇÃO 2D ===\n\n";
-    
+
+    std::cout << "\n=== INFORMAÇÕES DO SISTEMA ===" << std::endl;
+    int cpuThreads = std::thread::hardware_concurrency();
+    std::cout << "CPU: AMD Ryzen 7 8700g" << std::endl;
+    std::cout << "CPU Threads físicos: " << cpuThreads << std::endl;
+    std::cout << "----------------------------------------\n\n";
+
     for (const auto& res : resolucoes) {
         int width = res.first;
         int height = res.second;
@@ -348,50 +436,52 @@ int main(int argc, char* argv[]) {
         
         // Versão sequencial
         std::cout << "\nExecutando versão sequencial...\n";
-        double tempoSeq = medirTempo([&]() {
+        double *tempoSeq = medirTempo([&]() {
             Image out = convolucaoSequencial(img);
-            //salvarImagem(out, "saida_seq_" + std::to_string(width) + "x" + std::to_string(height) + ".pgm");
         });
-        std::cout << "Tempo sequencial: " << tempoSeq << "s\n";
+        std::cout << "Tempo: " << tempoSeq[0] << "s, Desvio Padrão: " << tempoSeq[1] << "\n";
         
         // Versão com threads
         for (int nt : numThreads) {
             if (nt > std::thread::hardware_concurrency()) continue;
             
             std::cout << "\nExecutando versão com " << nt << " threads...\n";
-            double tempoThreads = medirTempo([&]() {
+            double *tempoThreads = medirTempo([&]() {
                 Image out = convolucaoThreads(img, nt);
             });
             
-            double speedup = tempoSeq / tempoThreads;
+            double speedup = tempoSeq[0] / tempoThreads[0];
             double eficiencia = speedup / nt;
             
-            std::cout << "  Tempo: " << tempoThreads << "s, Speedup: " << speedup 
-                      << ", Eficiência: " << eficiencia << "\n";
+            std::cout << "  Tempo: " << tempoThreads[0] << "s, Desvio Padrão: " << tempoThreads[1] 
+            << "s, Speedup: " << speedup << ", Eficiência: " << eficiencia << "\n";
         }
         
         // Versão OpenMP
-        std::cout << "\nExecutando versão OpenMP...\n";
-        double tempoOpenMP = medirTempo([&]() {
-            Image out = convolucaoOpenMP(img);
+        std::cout << "\nExecutando versão OpenMP (Static)...\n";
+        double *tempoOpenMPStatic = medirTempo([&]() {
+            Image out = convolucaoOpenMPStatic(img);
+        });
+
+        std::cout << "Tempo OpenMP Static: " << tempoOpenMPStatic[0] << "s, Desvio Padrão: " << tempoOpenMPStatic[1]
+        << "s, Speedup: " << tempoSeq[0] / tempoOpenMPStatic[0] << "\n";
+        
+        std::cout << "\nExecutando versão OpenMP (Dynamic)...\n";
+        double *tempoOpenMPDynamic = medirTempo([&]() {
+            Image out = convolucaoOpenMPDynamic(img);
         });
         
-        std::cout << "Tempo OpenMP: " << tempoOpenMP << "s, Speedup: " 
-                  << tempoSeq / tempoOpenMP << "\n";
-        
-        #ifdef CUDA_ENABLED
-        // Versão CUDA
-        std::cout << "Executando versão CUDA...\n";
-        double tempoCUDA = medirTempo([&]() {
-            Image out = convolucaoCUDA(img);
+        std::cout << "Tempo OpenMP Dynamic: " << tempoOpenMPDynamic[0] << "s, Desvio Padrão: " << tempoOpenMPDynamic[1]
+        << "s, Speedup: " << tempoSeq[0] / tempoOpenMPDynamic[0] << "\n";
+
+        std::cout << "\nExecutando versão OpenMP (Collapse)...\n";
+        double *tempoOpenMPCollapse = medirTempo([&]() {
+            Image out = convolucaoOpenMPCollapse(img);
         });
         
-        std::cout << "Tempo CUDA: " << tempoCUDA << "s, Speedup: " 
-                  << tempoSeq / tempoCUDA << "\n";
-        #else
-        std::cout << "CUDA não habilitado nesta compilação\n";
-        #endif
-        
+        std::cout << "Tempo OpenMP: " << tempoOpenMPCollapse[0] << "s, Desvio Padrão: " << tempoOpenMPCollapse[1]
+        << "s, Speedup: " << tempoSeq[0] / tempoOpenMPCollapse[0] << "\n";
+
         std::cout << "----------------------------------------\n\n";
     }
     

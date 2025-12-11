@@ -1,4 +1,3 @@
-// convolucao_completa_com_metricas.cu - CUDA + C++ com Speedup e Eficiência
 #include <iostream>
 #include <vector>
 #include <chrono>
@@ -203,9 +202,10 @@ Image loadImage(const std::string& filename, int targetSize = 0) {
 }
 
 // ==================== KERNEL CUDA ====================
-__global__ void convolutionKernelSimple(
-    const float* input, float* output, 
-                                       int width, int height) {
+
+__global__ void convolutionKernelNoShared(
+        const float* input, float* output, 
+    int width, int height) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     
@@ -214,15 +214,16 @@ __global__ void convolutionKernelSimple(
     float sum = 0.0f;
     
     for (int ky = -1; ky <= 1; ky++) {
+        int iy = y + ky;
+        // Clamp das bordas na direção y
+        if (iy < 0) iy = 0;
+        else if (iy >= height) iy = height - 1;
+        
         for (int kx = -1; kx <= 1; kx++) {
-            int iy = y + ky;
             int ix = x + kx;
-            
-            // Clamp das bordas
-            if (iy < 0) iy = 0;
-            if (iy >= height) iy = height - 1;
+            // Clamp das bordas na direção x
             if (ix < 0) ix = 0;
-            if (ix >= width) ix = width - 1;
+            else if (ix >= width) ix = width - 1;
             
             int idx = (ky + 1) * 3 + (kx + 1);
             sum += input[iy * width + ix] * DEVICE_KERNEL[idx];
@@ -232,11 +233,81 @@ __global__ void convolutionKernelSimple(
     output[y * width + x] = sum;
 }
 
-// ==================== VERSÃO CUDA ====================
-float convolutionCUDA(const Image& input, Image& output) {
-    // Configurar kernel
+
+// ==================== KERNEL CUDA COM SHARED MEMORY ====================
+__global__ void convolutionKernelShared(
+    const float* input, float* output, 
+    int width, int height) {
+    
+    // Coordenadas globais
+    int gx = blockIdx.x * blockDim.x + threadIdx.x;
+    int gy = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    // Coordenadas locais no bloco
+    int lx = threadIdx.x;
+    int ly = threadIdx.y;
+    
+    // Dimensões do bloco
+    int blockHeight = blockDim.y;
+    
+    // Dimensões da shared memory com halo
+    int sharedWidth = blockDim.x + 2;  // +2 para halo
+    int sharedHeight = blockDim.y + 2; // +2 para halo
+    
+    // Shared memory dinâmica
+    extern __shared__ float sharedMem[];
+    
+    // Calcular índices com halo
+    int haloX = blockIdx.x * blockDim.x - 1;
+    int haloY = blockIdx.y * blockDim.y - 1;
+    
+    // Cada thread carrega até 4 elementos (para blocos 16x16)
+    for (int i = ly; i < sharedHeight; i += blockHeight) {
+        for (int j = lx; j < sharedWidth; j += blockDim.x) {
+            int globalY = haloY + i;
+            int globalX = haloX + j;
+            
+            // Clamp das bordas
+            if (globalY < 0) globalY = 0;
+            else if (globalY >= height) globalY = height - 1;
+            
+            if (globalX < 0) globalX = 0;
+            else if (globalX >= width) globalX = width - 1;
+            
+            sharedMem[i * sharedWidth + j] = input[globalY * width + globalX];
+        }
+    }
+    
+    __syncthreads();
+    
+    // Se a thread está fora da imagem, retorna
+    if (gx >= width || gy >= height) return;
+    
+    // Convolução usando shared memory
+    float sum = 0.0f;
+    
+    // Índice na shared memory (sem halo para o pixel central)
+    int sharedIdx = (ly + 1) * sharedWidth + (lx + 1);
+    
+    // Usando deslocamentos predefinidos na shared memory
+    sum += sharedMem[sharedIdx - sharedWidth - 1] * DEVICE_KERNEL[0];
+    sum += sharedMem[sharedIdx - sharedWidth] * DEVICE_KERNEL[1];
+    sum += sharedMem[sharedIdx - sharedWidth + 1] * DEVICE_KERNEL[2];
+    sum += sharedMem[sharedIdx - 1] * DEVICE_KERNEL[3];
+    sum += sharedMem[sharedIdx] * DEVICE_KERNEL[4];
+    sum += sharedMem[sharedIdx + 1] * DEVICE_KERNEL[5];
+    sum += sharedMem[sharedIdx + sharedWidth - 1] * DEVICE_KERNEL[6];
+    sum += sharedMem[sharedIdx + sharedWidth] * DEVICE_KERNEL[7];
+    sum += sharedMem[sharedIdx + sharedWidth + 1] * DEVICE_KERNEL[8];
+    
+    output[gy * width + gx] = sum;
+}
+
+// ==================== VERSÃO CUDA SEM SHARED MEMORY ====================
+double convolutionCUDA_NoShared(const Image& input, Image& output) {
+    // Configurar kernel constante
     float hostKernel[9];
-    for (int i = 0; i < 9; i++) hostKernel[i] = 1.0f / 9.0f;
+    for (int i = 0; i < 9; i++) hostKernel[i] = 1.0f / 9.0f;  // Média 3x3
     
     cudaMemcpyToSymbol(DEVICE_KERNEL, hostKernel, 9 * sizeof(float));
     
@@ -247,12 +318,13 @@ float convolutionCUDA(const Image& input, Image& output) {
     cudaMalloc(&d_input, size);
     cudaMalloc(&d_output, size);
     
-    // Copiar dados
+    // Copiar dados de entrada
     cudaMemcpy(d_input, input.data.data(), size, cudaMemcpyHostToDevice);
     
     // Configurar grid/blocos
     dim3 blockSize(16, 16);
-    dim3 gridSize((input.width + 15) / 16, (input.height + 15) / 16);
+    dim3 gridSize((input.width + blockSize.x - 1) / blockSize.x, 
+                  (input.height + blockSize.y - 1) / blockSize.y);
     
     // Medir tempo
     cudaEvent_t start, stop;
@@ -260,12 +332,68 @@ float convolutionCUDA(const Image& input, Image& output) {
     cudaEventCreate(&stop);
     
     cudaEventRecord(start);
-    convolutionKernelSimple<<<gridSize, blockSize>>>(d_input, d_output, 
-                                                    input.width, input.height);
+    convolutionKernelNoShared<<<gridSize, blockSize>>>(
+        d_input, d_output, input.width, input.height);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     
-    // Copiar resultado
+    // Copiar resultado de volta
+    output.width = input.width;
+    output.height = input.height;
+    output.data.resize(input.totalPixels());
+    cudaMemcpy(output.data.data(), d_output, size, cudaMemcpyDeviceToHost);
+    
+    // Tempo
+    float ms = 0;
+    cudaEventElapsedTime(&ms, start, stop);
+    
+    // Liberar memória
+    cudaFree(d_input);
+    cudaFree(d_output);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    
+    return ms / 1000.0f;
+}
+
+// ==================== VERSÃO CUDA COM SHARED MEMORY ====================
+double convolutionCUDA_Shared(const Image& input, Image& output) {
+    // Configurar kernel constante
+    float hostKernel[9];
+    for (int i = 0; i < 9; i++) hostKernel[i] = 1.0f / 9.0f;  // Média 3x3
+    
+    cudaMemcpyToSymbol(DEVICE_KERNEL, hostKernel, 9 * sizeof(float));
+    
+    // Alocar memória GPU
+    size_t size = input.memorySize();
+    float *d_input, *d_output;
+    
+    cudaMalloc(&d_input, size);
+    cudaMalloc(&d_output, size);
+    
+    // Copiar dados de entrada
+    cudaMemcpy(d_input, input.data.data(), size, cudaMemcpyHostToDevice);
+    
+    // Configurar grid/blocos
+    dim3 blockSize(16, 16);
+    dim3 gridSize((input.width + blockSize.x - 1) / blockSize.x, 
+                  (input.height + blockSize.y - 1) / blockSize.y);
+    
+    // Calcular tamanho da shared memory por bloco (incluindo halo)
+    size_t sharedMemSize = (blockSize.x + 2) * (blockSize.y + 2) * sizeof(float);
+    
+    // Medir tempo
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    cudaEventRecord(start);
+    convolutionKernelShared<<<gridSize, blockSize, sharedMemSize>>>(d_input, d_output, 
+                                                                    input.width, input.height);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    
+    // Copiar resultado de volta
     output.width = input.width;
     output.height = input.height;
     output.data.resize(input.totalPixels());
@@ -293,18 +421,52 @@ void testarResolucao(const Image& original, int targetSize, const std::string& t
     
     // Testar GPU CUDA
     if (testType == "all" || testType == "gpu" || testType == "cuda") {
-        std::cout << "\n[GPU CUDA] Executando..." << std::endl;
-        Image gpuResult;
-        float timeGPU = convolutionCUDA(original, gpuResult);
+        // Teste No Shared
+        int maxExecs = 10;
+        double timesNoShared[maxExecs];
+        double totalTimeNoShared = 0;
+        std::cout << "\nGPU CUDA (No Shared Memory) Executando..." << std::endl;
+        for (int execNumber = 0; execNumber < maxExecs; execNumber++){
+            Image gpuResult;
+            double timeGPU = convolutionCUDA_NoShared(original, gpuResult);
+            timesNoShared[execNumber] = timeGPU;
+            totalTimeNoShared += timeGPU;
+        }
+        double mediaNoShared = totalTimeNoShared / maxExecs;
+        double aux1 = 0, desvioNoShared = 0;      
+        for (int i = 0; i < maxExecs; i++){
+            aux1 += pow(timesNoShared[i] - mediaNoShared, 2);
+        }
+        desvioNoShared = aux1 / maxExecs;
 
-        std::cout << "Tempo: " << std::fixed << std::setprecision(4) << timeGPU << " segundos" 
+        std::cout << "Tempo: " << mediaNoShared << "s, Desvio Padrão: " << desvioNoShared << "s, " 
+                  << std::endl;
+
+        // Teste Shared
+        double timesShared[maxExecs];
+        double totalTimeShared = 0;
+        std::cout << "\nGPU CUDA (Shared Memory) Executando..." << std::endl;
+        for (int execNumber = 0; execNumber < maxExecs; execNumber++){
+            Image gpuResult;
+            double timeGPU = convolutionCUDA_Shared(original, gpuResult);
+            timesShared[execNumber] = timeGPU;
+            totalTimeShared += timeGPU;
+        }
+        double mediaShared = totalTimeShared / maxExecs;
+        double aux2 = 0, desvioShared = 0;      
+        for (int i = 0; i < maxExecs; i++){
+            aux2 += pow(timesShared[i] - mediaShared, 2);
+        }
+        desvioShared = aux2 / maxExecs;
+
+        std::cout << "Tempo: " << mediaShared << "s, Desvio Padrão: " << desvioShared << "s, " 
                   << std::endl;
     }
 }
 
 // ==================== MAIN ====================
 int main(int argc, char* argv[]) {
-    std::cout << std::fixed << std::setprecision(4);
+    std::cout << std::fixed << std::setprecision(12);
     std::cout << "=== CONVOLUÇÃO 2D - GPU ===" << std::endl;
     
     // Verificar argumentos
