@@ -10,6 +10,7 @@ sudo apt-get install -y \
     build-essential \
     libomp-dev \
     libpthread-stubs0-dev \
+    libopencv-dev \
     nvidia-cuda-toolkit  # se tiver GPU NVIDIA
 ```
 
